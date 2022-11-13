@@ -1,10 +1,12 @@
 package main
 
 import (
+	"barista.run/modules/gsuite/calendar"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/mbaynton/goi3status/pkg"
 	"net/http"
 	"os"
 	"os/exec"
@@ -32,8 +34,6 @@ import (
 	"barista.run/modules/netinfo"
 	"barista.run/modules/netspeed"
 	"barista.run/modules/sysinfo"
-	"barista.run/modules/volume"
-	"barista.run/modules/volume/alsa"
 	"barista.run/modules/weather"
 	"barista.run/modules/weather/openweathermap"
 	"barista.run/modules/wlan"
@@ -48,6 +48,15 @@ import (
 	colorful "github.com/lucasb-eyer/go-colorful"
 	"github.com/martinlindhe/unit"
 	keyring "github.com/zalando/go-keyring"
+)
+
+// Set private values via ldflags to hide from github
+var (
+	GithubClientId     string
+	GithubClientSecret string
+	OwmApiKey          string
+	GoogleClientId     string
+	GoogleClientSecret string
 )
 
 var spacer = pango.Text(" ").XXSmall()
@@ -95,26 +104,6 @@ func makeMediaIconAndPosition(m media.Info) *pango.Node {
 			pango.Textf("%s", formatMediaTime(m.Length)))
 	}
 	return iconAndPosition
-}
-
-func mediaFormatFunc(m media.Info) bar.Output {
-	if m.PlaybackStatus == media.Stopped || m.PlaybackStatus == media.Disconnected {
-		return nil
-	}
-	artist := truncate(m.Artist, 35)
-	title := truncate(m.Title, 70-len(artist))
-	if len(title) < 35 {
-		artist = truncate(m.Artist, 35-len(title))
-	}
-	var iconAndPosition bar.Output
-	if m.PlaybackStatus == media.Playing {
-		iconAndPosition = outputs.Repeat(func(time.Time) bar.Output {
-			return makeMediaIconAndPosition(m)
-		}).Every(time.Second)
-	} else {
-		iconAndPosition = makeMediaIconAndPosition(m)
-	}
-	return outputs.Group(iconAndPosition, outputs.Pango(title, " - ", artist))
 }
 
 func home(path ...string) string {
@@ -167,13 +156,13 @@ func (a autoWeatherProvider) GetWeather() (weather.Weather, error) {
 		return weather.Weather{}, err
 	}
 	return openweathermap.
-		New("%%OWM_API_KEY%%").
+		New(OwmApiKey).
 		Coords(lat, lng).
 		GetWeather()
 }
 
 func setupOauthEncryption() error {
-	const service = "barista-sample-bar"
+	const service = "barista-custom-bar"
 	var username string
 	if u, err := user.Current(); err == nil {
 		username = u.Username
@@ -211,15 +200,15 @@ func makeIconOutput(key string) *bar.Segment {
 	return outputs.Pango(spacer, pango.Icon(key), spacer)
 }
 
-var gsuiteOauthConfig = []byte(`{"installed": {
-	"client_id":"%%GOOGLE_CLIENT_ID%%",
+var gsuiteOauthConfig = []byte(fmt.Sprintf(`{"installed": {
+	"client_id":"%s",
 	"project_id":"i3-barista",
 	"auth_uri":"https://accounts.google.com/o/oauth2/auth",
 	"token_uri":"https://www.googleapis.com/oauth2/v3/token",
 	"auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs",
-	"client_secret":"%%GOOGLE_CLIENT_SECRET%%",
-	"redirect_uris":["urn:ietf:wg:oauth:2.0:oob","http://localhost"]
-}}`)
+	"client_secret":"%s",
+	"redirect_uris":["http://localhost"]
+}}`, GoogleClientId, GoogleClientSecret))
 
 func threshold(out *bar.Segment, urgent bool, color ...bool) *bar.Segment {
 	if urgent {
@@ -273,16 +262,6 @@ func main() {
 				}))
 		})
 
-	makeTzClock := func(lbl, tzName string) bar.Module {
-		c, err := clock.ZoneByName(tzName)
-		if err != nil {
-			panic(err)
-		}
-		return c.Output(time.Minute, func(now time.Time) bar.Output {
-			return outputs.Pango(pango.Text(lbl).Smaller(), spacer, now.Format("15:04"))
-		})
-	}
-
 	// Weather information comes from OpenWeatherMap.
 	// https://openweathermap.org/api.
 	wthr := weather.New(autoWeatherProvider{}).Output(func(w weather.Weather) bar.Output {
@@ -331,7 +310,7 @@ func main() {
 		out := outputs.Group()
 		out.Append(outputs.Pango(
 			pango.Icon("typecn-"+iconName), spacer,
-			pango.Textf("%.1f℃", w.Temperature.Celsius()),
+			pango.Textf("%.1fF", w.Temperature.Fahrenheit()),
 		))
 		out.Append(outputs.Text(w.Description))
 		out.Append(outputs.Pango(
@@ -436,26 +415,6 @@ func main() {
 		return out
 	}), 1)
 
-	vol := volume.New(alsa.DefaultMixer()).Output(func(v volume.Volume) bar.Output {
-		if v.Mute {
-			return outputs.
-				Pango(pango.Icon("fa-volume-mute").Alpha(0.8), spacer, "MUT").
-				Color(colors.Scheme("degraded"))
-		}
-		iconName := "off"
-		pct := v.Pct()
-		if pct > 66 {
-			iconName = "up"
-		} else if pct > 33 {
-			iconName = "down"
-		}
-		return outputs.Pango(
-			pango.Icon("fa-volume-"+iconName).Alpha(0.6),
-			spacer,
-			pango.Textf("%2d%%", pct),
-		)
-	})
-
 	loadAvg := sysinfo.New().Output(func(s sysinfo.Info) bar.Output {
 		out := outputs.Pango(
 			pango.Icon("mdi-desktop-tower").Alpha(0.6),
@@ -467,9 +426,10 @@ func main() {
 			return out
 		}
 		threshold(out,
-			s.Loads[0] > 128 || s.Loads[2] > 64,
-			s.Loads[0] > 64 || s.Loads[2] > 32,
-			s.Loads[0] > 32 || s.Loads[2] > 16,
+			s.Loads[0] > 16 || s.Loads[2] > 10, // urgent
+			s.Loads[0] > 7 || s.Loads[2] > 6,   // bad
+			s.Loads[0] >= 5 || s.Loads[2] > 5,  // degraded
+			true,                               // else good
 		)
 		out.OnClick(click.Left(func() {
 			mainModalController.Toggle("sysinfo")
@@ -582,12 +542,10 @@ func main() {
 		Output(func(r diskio.IO) bar.Output {
 			return pango.Icon("mdi-swap-vertical").
 				Concat(spacer).
-				ConcatText(format.IByterate(r.Total()))
+				ConcatText("Disk I/O ", format.IByterate(r.Total()))
 		})
 
-	mediaSummary, mediaDetail := split.New(media.Auto().Output(mediaFormatFunc), 1)
-
-	ghNotify := github.New("%%GITHUB_CLIENT_ID%%", "%%GITHUB_CLIENT_SECRET%%").
+	ghNotify := github.New(GithubClientId, GithubClientSecret).
 		Output(func(n github.Notifications) bar.Output {
 			if n.Total() == 0 {
 				return nil
@@ -608,28 +566,51 @@ func main() {
 				click.RunLeft("xdg-open", "https://github.com/notifications"))
 		})
 
+	calNotify := calendar.New(gsuiteOauthConfig).
+		RefreshInterval(time.Minute * 5).
+		CalendarID("mike.baynton@rstudio.com").
+		Output(func(evts calendar.EventList) bar.Output {
+			var e calendar.Event
+			switch {
+			case len(evts.InProgress) > 0:
+				e = evts.InProgress[0]
+			case len(evts.Alerting) > 0:
+				e = evts.Alerting[0]
+			case len(evts.Upcoming) > 0:
+				e = evts.Upcoming[0]
+			default:
+				return nil
+			}
+			untilStart := e.Start.Sub(time.Now().In(time.UTC))
+			/*
+				minus := ""
+				if untilStart < 0 {
+					untilStart = -untilStart
+					minus = "-"
+				}*/
+			return outputs.Repeat(func(time.Time) bar.Output {
+				return outputs.Textf("Cal: %s", untilStart)
+			}).AtNext(time.Minute)
+		})
+
 	mainModal := modal.New()
 	sysMode := mainModal.Mode("sysinfo").
 		SetOutput(makeIconOutput("mdi-chart-areaspline")).
 		Add(loadAvg).
 		Detail(loadAvgDetail, uptime).
 		Add(freeMem).
-		Detail(swapMem, temp)
+		Detail(swapMem, temp).
+		Add(wifiName).
+		Detail(wifiDetails, net, netsp)
 	if homeDiskspace != nil {
 		sysMode.Detail(homeDiskspace)
 	}
 	sysMode.Detail(rootDiskspace, mainDiskio)
-	mainModal.Mode("network").
-		SetOutput(makeIconOutput("mdi-ethernet")).
-		Summary(wifiName).
-		Detail(wifiDetails, net, netsp)
-	mainModal.Mode("media").
-		SetOutput(makeIconOutput("mdi-music-box")).
-		Add(vol, mediaSummary).
-		Detail(mediaDetail)
+
 	mainModal.Mode("notifications").
 		SetOutput(nil).
-		Add(ghNotify)
+		Add(ghNotify).
+		Add(calNotify)
 	mainModal.Mode("battery").
 		// Filled in by the battery module if one is available.
 		SetOutput(nil).
@@ -639,16 +620,13 @@ func main() {
 		// Set to current conditions by the weather module.
 		SetOutput(makeIconOutput("typecn-warning-outline")).
 		Detail(wthr)
-	mainModal.Mode("timezones").
-		SetOutput(makeIconOutput("material-access-time")).
-		Detail(makeTzClock("Seattle", "America/Los_Angeles")).
-		Detail(makeTzClock("New York", "America/New_York")).
-		Detail(makeTzClock("UTC", "Etc/UTC")).
-		Detail(makeTzClock("Berlin", "Europe/Berlin")).
-		Detail(makeTzClock("Tokyo", "Asia/Tokyo")).
-		Add(localdate)
+
+	tzMode := mainModal.Mode("timezones").SetOutput(makeIconOutput("material-access-time"))
+	for _, clock := range pkg.GetWorldClocks() {
+		tzMode.Detail(clock)
+	}
 
 	var mm bar.Module
 	mm, mainModalController = mainModal.Build()
-	panic(barista.Run(mm, localtime))
+	panic(barista.Run(mm, localdate, localtime))
 }
