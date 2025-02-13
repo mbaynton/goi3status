@@ -28,7 +28,6 @@ import (
 	"barista.run/modules/diskio"
 	"barista.run/modules/diskspace"
 	"barista.run/modules/github"
-	"barista.run/modules/media"
 	"barista.run/modules/meminfo"
 	"barista.run/modules/meta/split"
 	"barista.run/modules/netinfo"
@@ -91,19 +90,6 @@ func formatMediaTime(d time.Duration) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d", m, s)
-}
-
-func makeMediaIconAndPosition(m media.Info) *pango.Node {
-	iconAndPosition := pango.Icon("fa-music").Color(colors.Hex("#f70"))
-	if m.PlaybackStatus == media.Playing {
-		iconAndPosition.Append(spacer,
-			pango.Textf("%s/", formatMediaTime(m.Position())))
-	}
-	if m.PlaybackStatus == media.Paused || m.PlaybackStatus == media.Playing {
-		iconAndPosition.Append(spacer,
-			pango.Textf("%s", formatMediaTime(m.Length)))
-	}
-	return iconAndPosition
 }
 
 func home(path ...string) string {
@@ -494,27 +480,28 @@ func main() {
 			return out
 		})
 
-	sub := netlink.Any()
+	homeDockEthernet := "enxa02919c7a2b3"
+	sub := netlink.ByName(homeDockEthernet)
 	iface := sub.Get().Name
 	sub.Unsubscribe()
 	netsp := netspeed.New(iface).
 		RefreshInterval(2 * time.Second).
 		Output(func(s netspeed.Speeds) bar.Output {
 			return outputs.Pango(
-				pango.Icon("fa-upload").Alpha(0.5), spacer, pango.Textf("%7s", format.Byterate(s.Tx)),
+				pango.Icon("mdi-upload").Alpha(0.5), spacer, pango.Textf("%7s", format.Byterate(s.Tx)),
 				pango.Text(" ").Small(),
-				pango.Icon("fa-download").Alpha(0.5), spacer, pango.Textf("%7s", format.Byterate(s.Rx)),
+				pango.Icon("mdi-download").Alpha(0.5), spacer, pango.Textf("%7s", format.Byterate(s.Rx)),
 			)
 		})
 
-	net := netinfo.New().Output(func(i netinfo.State) bar.Output {
+	net := netinfo.Interface(homeDockEthernet).Output(func(i netinfo.State) bar.Output {
 		if !i.Enabled() {
 			return nil
 		}
 		if i.Connecting() || len(i.IPs) < 1 {
 			return outputs.Text(i.Name).Color(colors.Scheme("degraded"))
 		}
-		return outputs.Group(outputs.Text(i.Name), outputs.Textf("%s", i.IPs[0]))
+		return outputs.Group(outputs.Textf("%s", i.IPs[0]))
 	})
 
 	formatDiskSpace := func(i diskspace.Info, icon string) bar.Output {
@@ -551,7 +538,7 @@ func main() {
 				return nil
 			}
 			out := outputs.Group(
-				pango.Icon("fab-github").
+				pango.Icon("fa-github").
 					Concat(spacer).
 					ConcatTextf("%d", n.Total()))
 			mentions := n["mention"] + n["team_mention"]
@@ -581,16 +568,21 @@ func main() {
 			default:
 				return nil
 			}
-			untilStart := e.Start.Sub(time.Now().In(time.UTC))
 			/*
 				minus := ""
 				if untilStart < 0 {
 					untilStart = -untilStart
 					minus = "-"
 				}*/
+			var refreshInterval time.Duration
 			return outputs.Repeat(func(time.Time) bar.Output {
-				return outputs.Textf("Cal: %s", untilStart)
-			}).AtNext(time.Minute)
+				untilStart := e.Start.Sub(time.Now().In(time.UTC))
+				refreshInterval = time.Minute
+				if untilStart <= time.Minute*2 {
+					refreshInterval = time.Second
+				}
+				return outputs.Textf("Cal: %s", untilStart.Round(time.Second))
+			}).AtNext(refreshInterval)
 		})
 
 	mainModal := modal.New()
